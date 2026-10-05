@@ -1,5 +1,5 @@
 # Токен бота из @BotFather
-BOT_TOKEN = "Токен"
+BOT_TOKEN = ""
 
 # ID администраторов
-ADMINS = [8847778413]
+ADMINS = []

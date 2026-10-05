@@ -619,4 +619,4 @@ async def admin_blocked_list(call: CallbackQuery):
     if not blocked:
         await call.message.answer("Список пуст.")
     else:
-        text = "🚫 Заблокированные ID:\n" + "\n".join(f"• `{uid}`"
+        text = "🚫 Заблокированные ID:\n" + "\n".join(f"• `{uid}`" for uid in blocked)

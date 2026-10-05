@@ -373,7 +373,11 @@ async def notify_admins(message: Message):
                 await bot.send_sticker(admin_id, message.sticker.file_id)
         except Exception as e:
             logging.warning(f"Не смог отправить админу {admin_id}: {e}")
-
+@router.message(Command("admin"))
+async def cmd_admin(message: Message):
+    if message.from_user.id not in ADMINS:
+        return
+    await message.answer("🛠 Админ-панель", reply_markup=admin_menu())
 
 # ============================================================
 #  ВХОДЯЩИЕ СООБЩЕНИЯ (текст + медиа)
@@ -534,12 +538,6 @@ async def cb_history(call: CallbackQuery):
 # ============================================================
 #  АДМИН-ПАНЕЛЬ
 # ============================================================
-
-@router.message(Command("admin"))
-async def cmd_admin(message: Message):
-    if message.from_user.id not in ADMINS:
-        return
-    await message.answer("🛠 Админ-панель", reply_markup=admin_menu())
 
 
 @router.callback_query(F.data == "admin:blocked_list")

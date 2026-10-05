@@ -29,16 +29,15 @@ dp.include_router(router)
 
 
 # ---------- АНТИФЛУД ----------
-FLOOD_LIMIT = 5          # сколько сообщений
-FLOOD_WINDOW = 10        # за сколько секунд
-FLOOD_COOLDOWN = 30      # на сколько секунд затыкаем
+FLOOD_LIMIT = 5
+FLOOD_WINDOW = 10
+FLOOD_COOLDOWN = 30
 
 _user_messages = defaultdict(deque)
 _user_muted_until = {}
 
 
 def check_flood(user_id: int) -> bool:
-    """True, если юзер флудит."""
     now = time.time()
 
     if user_id in _user_muted_until:
@@ -60,7 +59,7 @@ def check_flood(user_id: int) -> bool:
     return False
 
 
-# ---------- СОСТОЯНИЯ (FSM) ----------
+# ---------- СОСТОЯНИЯ ----------
 class ReplyState(StatesGroup):
     waiting_for_message = State()
 
@@ -93,7 +92,8 @@ def user_message_kb(user_id: int) -> InlineKeyboardMarkup:
     kb.button(text="🚫 Заблокировать", callback_data=f"block:{user_id}")
     kb.button(text="🔇 Замутить", callback_data=f"mute:{user_id}")
     kb.button(text="Ответить📝", callback_data=f"reply:{user_id}")
-    kb.adjust(1)
+    kb.button(text="📜 История", callback_data=f"history:{user_id}")
+    kb.adjust(2, 2)
     return kb.as_markup()
 
 
@@ -108,13 +108,64 @@ def human_time(seconds: int) -> str:
     return " ".join(parts)
 
 
+def make_caption(header: str, message: Message) -> str:
+    caption = message.caption or ""
+    full = f"{header}\n\n{caption}" if caption else header
+    return full[:1024]
+
+
+def extract_content(message: Message):
+    """Возвращает (file_type, file_id, caption, text)."""
+    if message.text:
+        return "text", None, None, message.text
+    if message.photo:
+        return "photo", message.photo[-1].file_id, message.caption, None
+    if message.voice:
+        return "voice", message.voice.file_id, message.caption, None
+    if message.video:
+        return "video", message.video.file_id, message.caption, None
+    if message.document:
+        return "document", message.document.file_id, message.caption, None
+    if message.audio:
+        return "audio", message.audio.file_id, message.caption, None
+    if message.video_note:
+        return "video_note", message.video_note.file_id, None, None
+    if message.sticker:
+        return "sticker", message.sticker.file_id, None, None
+    return None, None, None, None
+
+
 # ---------- STARTUP / SHUTDOWN ----------
+_cleanup_task: asyncio.Task | None = None
+
+
+async def cleanup_task():
+    """Раз в сутки чистит сообщения старше 7 дней."""
+    while True:
+        try:
+            deleted = await db.cleanup_old_messages(days=7)
+            if deleted:
+                logging.info(f"Очистка истории: удалено {deleted} сообщений старше 7 дней")
+        except Exception as e:
+            logging.error(f"Очистка не удалась: {e}")
+        await asyncio.sleep(24 * 3600)
+
+
 async def on_startup(bot: Bot):
+    global _cleanup_task
     await db.init_db()
+    _cleanup_task = asyncio.create_task(cleanup_task())
     print(f"Бот запущен... ADMINS = {ADMINS}")
 
 
 async def on_shutdown(bot: Bot):
+    global _cleanup_task
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
     await db.close_db()
     print("Бот остановлен.")
 
@@ -124,7 +175,7 @@ dp.shutdown.register(on_shutdown)
 
 
 # ============================================================
-#  FSM-ОБРАБОТЧИКИ (регистрируем ПЕРВЫМИ)
+#  FSM-ОБРАБОТЧИКИ
 # ============================================================
 
 @router.message(ReplyState.waiting_for_message)
@@ -140,8 +191,13 @@ async def handle_admin_reply(message: Message, state: FSMContext):
         await message.answer("⚠️ Не найден получатель. Попробуй снова.")
         return
 
+    if not message.text:
+        await message.answer("⚠️ Отправь текстовое сообщение.")
+        return
+
     try:
         await bot.send_message(target, f"📨 Ответ:\n\n{message.text}")
+        await db.save_message(target, True, message.text, None, None, None)
         await message.answer("✅ Сообщение отправлено.")
     except Exception as e:
         await message.answer(f"❌ Не удалось отправить: {e}")
@@ -238,7 +294,6 @@ async def handle_unmute(message: Message, state: FSMContext):
 async def cmd_start(message: Message):
     user_id = message.from_user.id
 
-    # --- АДМИН ---
     if user_id in ADMINS:
         if await db.is_admin_seen(user_id):
             await message.answer("С возвращением, я вас ждал!")
@@ -249,27 +304,90 @@ async def cmd_start(message: Message):
         await message.answer("🛠 Админ-панель", reply_markup=admin_menu())
         return
 
-    # --- ЗАБЛОКИРОВАННЫЙ ---
     if await db.is_blocked(user_id):
         return
 
-    # --- ЗАМУЧЕННЫЙ ---
     mute_until = await db.get_mute_until(user_id)
     if mute_until:
         remaining = mute_until - int(time.time())
         await message.answer(f"⏳ Вы замучены. Осталось: {human_time(remaining)}")
         return
 
-    # --- ОБЫЧНЫЙ ЮЗЕР ---
     await message.answer("Привет! пиши что тебе нужно, скоро тебя ответят...")
 
 
 # ============================================================
-#  ВХОДЯЩИЕ СООБЩЕНИЯ
+#  УВЕДОМЛЕНИЕ АДМИНАМ
 # ============================================================
 
-@router.message(F.text & ~F.text.startswith("/"))
+async def notify_admins(message: Message):
+    user = message.from_user
+    username = f"@{user.username}" if user.username else "без юзернейма"
+    header = f"📩 От: {user.full_name} ({username})\nID: {user.id}"
+    kb = user_message_kb(user.id)
+
+    for admin_id in ADMINS:
+        try:
+            if message.text:
+                await bot.send_message(
+                    admin_id,
+                    f"📩 Новое сообщение\nОт: {user.full_name} ({username})\nID: `{user.id}`\n\n{message.text}",
+                    parse_mode="Markdown",
+                    reply_markup=kb,
+                )
+            elif message.photo:
+                await bot.send_photo(
+                    admin_id, message.photo[-1].file_id,
+                    caption=make_caption(f"📩 Фото\n{header}", message),
+                    reply_markup=kb,
+                )
+            elif message.voice:
+                await bot.send_voice(
+                    admin_id, message.voice.file_id,
+                    caption=make_caption(f"📩 Голосовое\n{header}", message),
+                    reply_markup=kb,
+                )
+            elif message.video:
+                await bot.send_video(
+                    admin_id, message.video.file_id,
+                    caption=make_caption(f"📩 Видео\n{header}", message),
+                    reply_markup=kb,
+                )
+            elif message.document:
+                await bot.send_document(
+                    admin_id, message.document.file_id,
+                    caption=make_caption(f"📩 Документ\n{header}", message),
+                    reply_markup=kb,
+                )
+            elif message.audio:
+                await bot.send_audio(
+                    admin_id, message.audio.file_id,
+                    caption=make_caption(f"📩 Аудио\n{header}", message),
+                    reply_markup=kb,
+                )
+            elif message.video_note:
+                await bot.send_message(admin_id, f"📩 Видео-кружок\n{header}", reply_markup=kb)
+                await bot.send_video_note(admin_id, message.video_note.file_id)
+            elif message.sticker:
+                await bot.send_message(admin_id, f"📩 Стикер\n{header}", reply_markup=kb)
+                await bot.send_sticker(admin_id, message.sticker.file_id)
+        except Exception as e:
+            logging.warning(f"Не смог отправить админу {admin_id}: {e}")
+
+
+# ============================================================
+#  ВХОДЯЩИЕ СООБЩЕНИЯ (текст + медиа)
+# ============================================================
+
+@router.message()
 async def silent_handler(message: Message):
+    if message.from_user is None:
+        return
+
+    # Команды игнорим — их обрабатывают другие хендлеры
+    if message.text and message.text.startswith("/"):
+        return
+
     user_id = message.from_user.id
 
     if user_id in ADMINS:
@@ -298,35 +416,23 @@ async def silent_handler(message: Message):
         for admin_id in ADMINS:
             try:
                 await bot.send_message(
-                    admin_id,
-                    warning,
+                    admin_id, warning,
                     parse_mode="Markdown",
                     reply_markup=user_message_kb(user.id),
                 )
             except Exception as e:
                 logging.warning(f"Антифлуд: не смог уведомить {admin_id}: {e}")
         return
-    # ---------- /АНТИФЛУД ----------
 
-    user = message.from_user
-    username = f"@{user.username}" if user.username else "без юзернейма"
-    text = (
-        f"📩 Новое сообщение\n"
-        f"От: {user.full_name} ({username})\n"
-        f"ID: `{user.id}`\n\n"
-        f"{message.text}"
-    )
+    # ---------- СОХРАНЕНИЕ В ИСТОРИЮ ----------
+    file_type, file_id, caption, text = extract_content(message)
+    try:
+        await db.save_message(user_id, False, text, file_type, file_id, caption)
+    except Exception as e:
+        logging.warning(f"Не смог сохранить сообщение в историю: {e}")
 
-    for admin_id in ADMINS:
-        try:
-            await bot.send_message(
-                admin_id,
-                text,
-                parse_mode="Markdown",
-                reply_markup=user_message_kb(user.id),
-            )
-        except Exception as e:
-            logging.warning(f"Не смог переслать админу {admin_id}: {e}")
+    # ---------- ПЕРЕСЫЛКА АДМИНАМ ----------
+    await notify_admins(message)
 
 
 # ============================================================
@@ -353,10 +459,13 @@ async def cb_block(call: CallbackQuery):
         logging.warning(f"Не смог уведомить юзера {user_id}: {e}")
 
     try:
-        new_text = (call.message.text or "") + "\n\n🚫 Заблокирован"
-        await call.message.edit_text(new_text, reply_markup=None)
-    except Exception as e:
-        logging.warning(f"edit_text failed: {e}")
+        new_text = (call.message.text or call.message.caption or "") + "\n\n🚫 Заблокирован"
+        await call.message.edit_caption(caption=new_text[:1024], reply_markup=None)
+    except Exception:
+        try:
+            await call.message.edit_text(new_text, reply_markup=None)
+        except Exception as e:
+            logging.warning(f"Не смог отредактировать сообщение: {e}")
 
     await call.answer(f"Пользователь {user_id} заблокирован")
 
@@ -388,6 +497,37 @@ async def cb_reply(call: CallbackQuery, state: FSMContext):
     await state.update_data(target_user_id=user_id)
     await state.set_state(ReplyState.waiting_for_message)
     await call.message.answer("Напишите сообщение!")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("history:"))
+async def cb_history(call: CallbackQuery):
+    if call.from_user.id not in ADMINS:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(call.data.split(":")[1])
+    messages = await db.get_history(user_id, limit=15)
+
+    if not messages:
+        await call.message.answer("📜 История пуста.")
+        await call.answer()
+        return
+
+    lines = [f"📜 История с {user_id}:", ""]
+    for m in messages:
+        who = "👤 Админ" if m["from_admin"] else "🙋 Юзер"
+        content = m["text"] or m["caption"] or f"[{m['file_type']}]"
+        if len(content) > 80:
+            content = content[:80] + "…"
+        ts = time.strftime("%d.%m %H:%M", time.localtime(m["ts"]))
+        lines.append(f"{who} ({ts}): {content}")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "\n…"
+
+    await call.message.answer(text)
     await call.answer()
 
 

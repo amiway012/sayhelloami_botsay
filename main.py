@@ -623,4 +623,4 @@ async def admin_muted_list(call: CallbackQuery):
         lines = []
         for uid, until in muted:
             lines.append("• " + str(uid) + " — осталось " + human_time(until - now))
-        await call.message.answer("🔇 Замученные:\
+        await call.message.answer("🔇 Замученные:\n" + "\n".join(lines))

@@ -29,29 +29,21 @@ dp.include_router(router)
 
 
 # ---------- АНТИФЛУД ----------
-FLOOD_LIMIT = 5              # сколько сообщений
-FLOOD_WINDOW = 10            # за сколько секунд
-FLOOD_COOLDOWN = 10 * 60     # 10 минут игнора
+FLOOD_LIMIT = 5
+FLOOD_WINDOW = 10
+FLOOD_COOLDOWN = 10 * 60
 
 _user_messages = defaultdict(deque)
 _user_muted_until = {}
 
 
 def check_flood(user_id: int) -> str:
-    """
-    Возвращает:
-      "ok"       — всё нормально, продолжаем обработку
-      "trigger"  — только что превысил лимит (первое срабатывание)
-      "ignoring" — уже в кулдауне, надо игнорировать молча
-    """
     now = time.time()
 
-    # Уже в кулдауне?
     if user_id in _user_muted_until:
         if now < _user_muted_until[user_id]:
             return "ignoring"
         else:
-            # кулдаун истёк — сбрасываем
             del _user_muted_until[user_id]
 
     q = _user_messages[user_id]
@@ -161,7 +153,7 @@ async def on_startup(bot: Bot):
     global _cleanup_task
     await db.init_db()
     _cleanup_task = asyncio.create_task(cleanup_task())
-    print(f"🚀 VERSION 4.0 FLOOD-FIX")
+    print("🚀 VERSION 4.0 FLOOD-FIX")
     print(f"Бот запущен... ADMINS = {ADMINS}")
 
 
@@ -206,35 +198,35 @@ async def handle_admin_reply(message: Message, state: FSMContext):
         elif message.photo:
             await bot.send_photo(
                 target, message.photo[-1].file_id,
-                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
             )
             await db.save_message(target, True, None, "photo", message.photo[-1].file_id, message.caption)
 
         elif message.voice:
             await bot.send_voice(
                 target, message.voice.file_id,
-                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
             )
             await db.save_message(target, True, None, "voice", message.voice.file_id, message.caption)
 
         elif message.video:
             await bot.send_video(
                 target, message.video.file_id,
-                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
             )
             await db.save_message(target, True, None, "video", message.video.file_id, message.caption)
 
         elif message.document:
             await bot.send_document(
                 target, message.document.file_id,
-                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
             )
             await db.save_message(target, True, None, "document", message.document.file_id, message.caption)
 
         elif message.audio:
             await bot.send_audio(
                 target, message.audio.file_id,
-                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
             )
             await db.save_message(target, True, None, "audio", message.audio.file_id, message.caption)
 
@@ -340,7 +332,7 @@ async def handle_unmute(message: Message, state: FSMContext):
 
 
 # ============================================================
-#  КОМАНДЫ — /start И /admin ДО ЛОВУШКИ
+#  КОМАНДЫ
 # ============================================================
 
 @router.message(CommandStart())
@@ -461,26 +453,20 @@ async def silent_handler(message: Message):
         await message.answer(f"⏳ Вы замучены. Осталось: {human_time(remaining)}")
         return
 
-    # ---------- АНТИФЛУД ----------
     flood_status = check_flood(user_id)
 
     if flood_status == "ignoring":
-        # Тихо игнорируем, ничего не пишем ни юзеру, ни админам
         return
 
     if flood_status == "trigger":
         user = message.from_user
         username = f"@{user.username}" if user.username else "без юзернейма"
 
-        # --- юзеру: ОДНО сообщение ---
         try:
-            await message.answer(
-                "⚠️ Слишком много сообщений. Подождите 10 минут."
-            )
+            await message.answer("⚠️ Слишком много сообщений. Подождите 10 минут.")
         except Exception:
             pass
 
-        # --- админам: ОДНО сообщение ---
         warning = (
             f"⚠️ Антифлуд сработал\n"
             f"От: {user.full_name} ({username})\n"
@@ -498,7 +484,6 @@ async def silent_handler(message: Message):
             except Exception as e:
                 logging.warning(f"Антифлуд: не смог уведомить {admin_id}: {e}")
         return
-    # ---------- /АНТИФЛУД ----------
 
     file_type, file_id, caption, text = extract_content(message)
     try:
@@ -619,4 +604,23 @@ async def admin_blocked_list(call: CallbackQuery):
     if not blocked:
         await call.message.answer("Список пуст.")
     else:
-        text = "🚫 Заблокированные ID:\n" + "\n".join(f"• `{uid}`" for uid in blocked)
+        joined = "\n".join("• " + str(uid) for uid in blocked)
+        await call.message.answer("🚫 Заблокированные ID:\n" + joined)
+    await call.answer()
+
+
+@router.callback_query(F.data == "admin:muted_list")
+async def admin_muted_list(call: CallbackQuery):
+    if call.from_user.id not in ADMINS:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+
+    muted = await db.get_all_muted()
+    if not muted:
+        await call.message.answer("Список пуст.")
+    else:
+        now = int(time.time())
+        lines = []
+        for uid, until in muted:
+            lines.append("• " + str(uid) + " — осталось " + human_time(until - now))
+        await call.message.answer("🔇 Замученные:\

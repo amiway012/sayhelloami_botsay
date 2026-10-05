@@ -21,6 +21,24 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
+@router.message(F.text & ~F.text.startswith("/"))
+async def silent_handler(message: Message):
+    if db.is_blocked(message.from_user.id):
+        return
+
+    # Пересылаем сообщение всем админам
+    user = message.from_user
+    text = (
+        f"📩 Новое сообщение\n"
+        f"От: {user.full_name} (@{user.username})\n"
+        f"ID: `{user.id}`\n\n"
+        f"{message.text}"
+    )
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="Markdown")
+        except Exception as e:
+            logging.warning(f"Не смог отправить админу {admin_id}: {e}")
 
 # ---------- КЛАВИАТУРЫ ----------
 def admin_menu() -> InlineKeyboardMarkup:

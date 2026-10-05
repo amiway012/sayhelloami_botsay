@@ -27,7 +27,7 @@ router = Router()
 dp.include_router(router)
 
 
-# ---------- СОСТОЯНИЯ (FSM) ----------
+# ---------- СОСТОЯНИЯ ----------
 class ReplyState(StatesGroup):
     waiting_for_message = State()
 
@@ -75,16 +75,23 @@ def human_time(seconds: int) -> str:
     return " ".join(parts)
 
 
-# ---------- СТАРТ БОТА ----------
+# ---------- STARTUP / SHUTDOWN ----------
 async def on_startup(bot: Bot):
+    await db.init_db()
     print(f"Бот запущен... ADMINS = {ADMINS}")
 
 
+async def on_shutdown(bot: Bot):
+    await db.close_db()
+    print("Бот остановлен.")
+
+
 dp.startup.register(on_startup)
+dp.shutdown.register(on_shutdown)
 
 
 # ============================================================
-#  FSM-ОБРАБОТЧИКИ (регистрируем ПЕРВЫМИ, чтобы ловили раньше)
+#  FSM-ОБРАБОТЧИКИ
 # ============================================================
 
 @router.message(ReplyState.waiting_for_message)
@@ -125,7 +132,7 @@ async def handle_mute_hours(message: Message, state: FSMContext):
         await message.answer("⚠️ Не найден пользователь.")
         return
 
-    db.mute_user(target, hours)
+    await db.mute_user(target, hours)
 
     try:
         await bot.send_message(target, f"⏳ Вы замучены на {hours} ч.")
@@ -150,11 +157,11 @@ async def handle_unblock(message: Message, state: FSMContext):
     user_id = int(message.text)
     await state.clear()
 
-    if not db.is_blocked(user_id):
+    if not await db.is_blocked(user_id):
         await message.answer(f"Пользователь `{user_id}` не в блоке.", parse_mode="Markdown")
         return
 
-    db.unblock_user(user_id)
+    await db.unblock_user(user_id)
 
     try:
         await bot.send_message(user_id, "✅ Вы были разблокированы.")
@@ -176,11 +183,11 @@ async def handle_unmute(message: Message, state: FSMContext):
     user_id = int(message.text)
     await state.clear()
 
-    if not db.get_mute_until(user_id):
+    if not await db.get_mute_until(user_id):
         await message.answer(f"Пользователь `{user_id}` не в муте.", parse_mode="Markdown")
         return
 
-    db.unmute_user(user_id)
+    await db.unmute_user(user_id)
 
     try:
         await bot.send_message(user_id, "✅ Мут снят.")
@@ -191,7 +198,7 @@ async def handle_unmute(message: Message, state: FSMContext):
 
 
 # ============================================================
-#  КОМАНДА /start
+#  /start
 # ============================================================
 
 @router.message(CommandStart())
@@ -200,21 +207,21 @@ async def cmd_start(message: Message):
 
     # --- АДМИН ---
     if user_id in ADMINS:
-        if db.is_admin_seen(user_id):
+        if await db.is_admin_seen(user_id):
             await message.answer("С возвращением, я вас ждал!")
         else:
             await message.answer("Привет, рады видеть вас!")
-            db.mark_admin_seen(user_id)
+            await db.mark_admin_seen(user_id)
 
         await message.answer("🛠 Админ-панель", reply_markup=admin_menu())
         return
 
     # --- ЗАБЛОКИРОВАННЫЙ ---
-    if db.is_blocked(user_id):
+    if await db.is_blocked(user_id):
         return
 
     # --- ЗАМУЧЕННЫЙ ---
-    mute_until = db.get_mute_until(user_id)
+    mute_until = await db.get_mute_until(user_id)
     if mute_until:
         remaining = mute_until - int(time.time())
         await message.answer(f"⏳ Вы замучены. Осталось: {human_time(remaining)}")
@@ -225,23 +232,20 @@ async def cmd_start(message: Message):
 
 
 # ============================================================
-#  ВХОДЯЩИЕ СООБЩЕНИЯ ОТ ЮЗЕРОВ
+#  СООБЩЕНИЯ ОТ ЮЗЕРОВ
 # ============================================================
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def silent_handler(message: Message):
     user_id = message.from_user.id
 
-    # Сообщения самих админов не пересылаем
     if user_id in ADMINS:
         return
 
-    # Заблокирован — молчим
-    if db.is_blocked(user_id):
+    if await db.is_blocked(user_id):
         return
 
-    # Замучен — отвечаем и молчим
-    mute_until = db.get_mute_until(user_id)
+    mute_until = await db.get_mute_until(user_id)
     if mute_until:
         remaining = mute_until - int(time.time())
         await message.answer(f"⏳ Вы замучены. Осталось: {human_time(remaining)}")
@@ -280,11 +284,11 @@ async def cb_block(call: CallbackQuery):
 
     user_id = int(call.data.split(":")[1])
 
-    if db.is_blocked(user_id):
+    if await db.is_blocked(user_id):
         await call.answer("Уже заблокирован", show_alert=True)
         return
 
-    db.block_user(user_id)
+    await db.block_user(user_id)
 
     try:
         await bot.send_message(user_id, "Вы были заблокированы⛔")
@@ -347,7 +351,7 @@ async def admin_blocked_list(call: CallbackQuery):
         await call.answer("Нет доступа", show_alert=True)
         return
 
-    blocked = db.get_all_blocked()
+    blocked = await db.get_all_blocked()
     if not blocked:
         await call.message.answer("Список пуст.")
     else:
@@ -362,14 +366,12 @@ async def admin_muted_list(call: CallbackQuery):
         await call.answer("Нет доступа", show_alert=True)
         return
 
-    muted = db.get_all_muted()
+    muted = await db.get_all_muted()
     if not muted:
         await call.message.answer("Список пуст.")
     else:
         now = int(time.time())
-        lines = []
-        for uid, until in muted:
-            lines.append(f"• `{uid}` — осталось {human_time(until - now)}")
+        lines = [f"• `{uid}` — осталось {human_time(until - now)}" for uid, until in muted]
         await call.message.answer("🔇 Замученные:\n" + "\n".join(lines), parse_mode="Markdown")
     await call.answer()
 
@@ -396,7 +398,6 @@ async def admin_unmute_start(call: CallbackQuery, state: FSMContext):
 
 # ---------- ЗАПУСК ----------
 async def main():
-    db.init_db()
     await dp.start_polling(bot)
 
 

@@ -7,38 +7,22 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
-    InlineKeyboardButton,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import BOT_TOKEN, ADMINS
 import database as db
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def silent_handler(message: Message):
-    if db.is_blocked(message.from_user.id):
-        return
-
-    # Пересылаем сообщение всем админам
-    user = message.from_user
-    text = (
-        f"📩 Новое сообщение\n"
-        f"От: {user.full_name} (@{user.username})\n"
-        f"ID: `{user.id}`\n\n"
-        f"{message.text}"
-    )
-    for admin_id in ADMINS:
-        try:
-            await bot.send_message(admin_id, text, parse_mode="Markdown")
-        except Exception as e:
-            logging.warning(f"Не смог отправить админу {admin_id}: {e}")
 
 # ---------- КЛАВИАТУРЫ ----------
 def admin_menu() -> InlineKeyboardMarkup:
@@ -50,22 +34,47 @@ def admin_menu() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+# ---------- УВЕДОМЛЕНИЕ ПРИ СТАРТЕ ----------
+async def on_startup(bot: Bot):
+    print("Бот запущен...")
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(admin_id, "✅ Бот запущен и готов к работе")
+        except Exception as e:
+            logging.warning(f"Не смог уведомить админа {admin_id}: {e}")
+
+
+dp.startup.register(on_startup)
+
+
 # ---------- ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ ----------
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     if db.is_blocked(message.from_user.id):
-        return  # заблокированный пользователь не получает ответа
+        return
     await message.answer("Привет, сообщение получено, ожидай ответа")
 
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def silent_handler(message: Message):
-    # Согласно ТЗ — на все остальные сообщения бот молчит.
-    # Здесь можно оставить логику пустой или добавить уведомление админам.
+    # Заблокированным — молчим совсем
     if db.is_blocked(message.from_user.id):
         return
-    # ничего не отвечаем
-    pass
+
+    # Пересылаем сообщение всем админам
+    user = message.from_user
+    username = f"@{user.username}" if user.username else "без юзернейма"
+    text = (
+        f"📩 Новое сообщение\n"
+        f"От: {user.full_name} ({username})\n"
+        f"ID: `{user.id}`\n\n"
+        f"{message.text}"
+    )
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="Markdown")
+        except Exception as e:
+            logging.warning(f"Не смог переслать админу {admin_id}: {e}")
 
 
 # ---------- АДМИН-ПАНЕЛЬ ----------
@@ -117,7 +126,6 @@ async def admin_list(call: CallbackQuery):
 
 
 # ---------- ОБРАБОТКА ID ОТ АДМИНА ----------
-# Этот хендлер ловит числовые сообщения от админов, когда они вводят ID.
 @router.message(F.text.regexp(r"^\d+$"))
 async def admin_id_input(message: Message):
     if message.from_user.id not in ADMINS:
@@ -125,20 +133,23 @@ async def admin_id_input(message: Message):
 
     user_id = int(message.text)
 
-    # Проверяем, есть ли пользователь в блоке, чтобы понять — блокируем или разблокируем.
-    # Логика: если он уже заблокирован — разблокируем, иначе блокируем.
-    # Чтобы не запутаться, лучше явно спросить действие. Упростим: чередуем.
     if db.is_blocked(user_id):
         db.unblock_user(user_id)
-        await message.answer(f"✅ Пользователь `{user_id}` разблокирован.", parse_mode="Markdown")
+        await message.answer(
+            f"✅ Пользователь `{user_id}` разблокирован.",
+            parse_mode="Markdown",
+        )
     else:
         db.block_user(user_id)
-        await message.answer(f"🚫 Пользователь `{user_id}` заблокирован.", parse_mode="Markdown")
+        await message.answer(
+            f"🚫 Пользователь `{user_id}` заблокирован.",
+            parse_mode="Markdown",
+        )
 
 
+# ---------- ЗАПУСК ----------
 async def main():
     db.init_db()
-    print("Бот запущен...")
     await dp.start_polling(bot)
 
 

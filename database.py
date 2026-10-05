@@ -15,22 +15,44 @@ async def init_db():
     _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
 
     async with _pool.acquire() as conn:
+        # Блокировки
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS blocked (
                 user_id BIGINT PRIMARY KEY
             )
         """)
+        # Муты
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS muted (
                 user_id BIGINT PRIMARY KEY,
                 until BIGINT
             )
         """)
+        # Админы, которые уже видели приветствие
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS admins_seen (
                 user_id BIGINT PRIMARY KEY
             )
         """)
+        # История переписки
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                from_admin BOOLEAN NOT NULL,
+                text TEXT,
+                file_type TEXT,
+                file_id TEXT,
+                caption TEXT,
+                ts BIGINT NOT NULL
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_user_ts ON messages (user_id, ts DESC)"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages (ts)"
+        )
 
 
 async def close_db():
@@ -114,3 +136,47 @@ async def is_admin_seen(user_id: int) -> bool:
     async with _pool.acquire() as conn:
         row = await conn.fetchrow("SELECT 1 FROM admins_seen WHERE user_id = $1", user_id)
         return row is not None
+
+
+# ---------- ИСТОРИЯ ----------
+async def save_message(
+    user_id: int,
+    from_admin: bool,
+    text: str | None,
+    file_type: str | None,
+    file_id: str | None,
+    caption: str | None,
+):
+    async with _pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO messages (user_id, from_admin, text, file_type, file_id, caption, ts)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            user_id, from_admin, text, file_type, file_id, caption, int(time.time()),
+        )
+
+
+async def get_history(user_id: int, limit: int = 15):
+    async with _pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT from_admin, text, file_type, caption, ts
+            FROM messages
+            WHERE user_id = $1
+            ORDER BY ts DESC
+            LIMIT $2
+            """,
+            user_id, limit,
+        )
+        return list(reversed(rows))
+
+
+async def cleanup_old_messages(days: int = 7) -> int:
+    cutoff = int(time.time()) - days * 86400
+    async with _pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM messages WHERE ts < $1", cutoff)
+        try:
+            return int(result.split()[-1])
+        except Exception:
+            return 0

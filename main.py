@@ -1,8 +1,11 @@
 import asyncio
 import logging
+import time
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -24,49 +27,224 @@ router = Router()
 dp.include_router(router)
 
 
+# ---------- СОСТОЯНИЯ (FSM) ----------
+class ReplyState(StatesGroup):
+    waiting_for_message = State()
+
+
+class MuteState(StatesGroup):
+    waiting_for_hours = State()
+
+
+class UnblockState(StatesGroup):
+    waiting_for_user_id = State()
+
+
+class UnmuteState(StatesGroup):
+    waiting_for_user_id = State()
+
+
 # ---------- КЛАВИАТУРЫ ----------
 def admin_menu() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="📋 Список заблокированных", callback_data="admin:list")
+    kb.button(text="📋 Заблокированные", callback_data="admin:blocked_list")
+    kb.button(text="🔇 Замученные", callback_data="admin:muted_list")
     kb.button(text="✅ Разблокировать по ID", callback_data="admin:unblock")
+    kb.button(text="🔊 Размутить по ID", callback_data="admin:unmute")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def block_button(user_id: int) -> InlineKeyboardMarkup:
+def user_message_kb(user_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="🚫 Заблокировать", callback_data=f"block:{user_id}")
+    kb.button(text="🔇 Замутить", callback_data=f"mute:{user_id}")
+    kb.button(text="Ответить📝", callback_data=f"reply:{user_id}")
+    kb.adjust(1)
     return kb.as_markup()
 
 
-# ---------- УВЕДОМЛЕНИЕ ПРИ СТАРТЕ ----------
+def human_time(seconds: int) -> str:
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    parts = []
+    if h:
+        parts.append(f"{h}ч")
+    if m or not parts:
+        parts.append(f"{m}м")
+    return " ".join(parts)
+
+
+# ---------- СТАРТ БОТА ----------
 async def on_startup(bot: Bot):
     print(f"Бот запущен... ADMINS = {ADMINS}")
-    for admin_id in ADMINS:
-        try:
-            await bot.send_message(admin_id, "✅ Бот запущен и готов к работе")
-        except Exception as e:
-            logging.warning(f"Не смог уведомить админа {admin_id}: {e}")
 
 
 dp.startup.register(on_startup)
 
 
-# ---------- ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ ----------
+# ============================================================
+#  FSM-ОБРАБОТЧИКИ (регистрируем ПЕРВЫМИ, чтобы ловили раньше)
+# ============================================================
+
+@router.message(ReplyState.waiting_for_message)
+async def handle_admin_reply(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+
+    data = await state.get_data()
+    target = data.get("target_user_id")
+    await state.clear()
+
+    if not target:
+        await message.answer("⚠️ Не найден получатель. Попробуй снова.")
+        return
+
+    try:
+        await bot.send_message(target, f"📨 Ответ:\n\n{message.text}")
+        await message.answer("✅ Сообщение отправлено.")
+    except Exception as e:
+        await message.answer(f"❌ Не удалось отправить: {e}")
+
+
+@router.message(MuteState.waiting_for_hours)
+async def handle_mute_hours(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+
+    if not message.text or not message.text.isdigit():
+        await message.answer("Отправь число часов, например: 24")
+        return
+
+    hours = int(message.text)
+    data = await state.get_data()
+    target = data.get("target_user_id")
+    await state.clear()
+
+    if not target:
+        await message.answer("⚠️ Не найден пользователь.")
+        return
+
+    db.mute_user(target, hours)
+
+    try:
+        await bot.send_message(target, f"⏳ Вы замучены на {hours} ч.")
+    except Exception:
+        pass
+
+    await message.answer(
+        f"🔇 Пользователь `{target}` замучен на {hours} ч.",
+        parse_mode="Markdown",
+    )
+
+
+@router.message(UnblockState.waiting_for_user_id)
+async def handle_unblock(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+
+    if not message.text or not message.text.isdigit():
+        await message.answer("Отправь числовой ID.")
+        return
+
+    user_id = int(message.text)
+    await state.clear()
+
+    if not db.is_blocked(user_id):
+        await message.answer(f"Пользователь `{user_id}` не в блоке.", parse_mode="Markdown")
+        return
+
+    db.unblock_user(user_id)
+
+    try:
+        await bot.send_message(user_id, "✅ Вы были разблокированы.")
+    except Exception:
+        pass
+
+    await message.answer(f"✅ `{user_id}` разблокирован.", parse_mode="Markdown")
+
+
+@router.message(UnmuteState.waiting_for_user_id)
+async def handle_unmute(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+
+    if not message.text or not message.text.isdigit():
+        await message.answer("Отправь числовой ID.")
+        return
+
+    user_id = int(message.text)
+    await state.clear()
+
+    if not db.get_mute_until(user_id):
+        await message.answer(f"Пользователь `{user_id}` не в муте.", parse_mode="Markdown")
+        return
+
+    db.unmute_user(user_id)
+
+    try:
+        await bot.send_message(user_id, "✅ Мут снят.")
+    except Exception:
+        pass
+
+    await message.answer(f"🔊 `{user_id}` размучен.", parse_mode="Markdown")
+
+
+# ============================================================
+#  КОМАНДА /start
+# ============================================================
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    if db.is_blocked(message.from_user.id):
-        return
-    await message.answer("Привет, сообщение получено, ожидай ответа")
+    user_id = message.from_user.id
 
+    # --- АДМИН ---
+    if user_id in ADMINS:
+        if db.is_admin_seen(user_id):
+            await message.answer("С возвращением, я вас ждал!")
+        else:
+            await message.answer("Привет, рады видеть вас!")
+            db.mark_admin_seen(user_id)
+
+        await message.answer("🛠 Админ-панель", reply_markup=admin_menu())
+        return
+
+    # --- ЗАБЛОКИРОВАННЫЙ ---
+    if db.is_blocked(user_id):
+        return
+
+    # --- ЗАМУЧЕННЫЙ ---
+    mute_until = db.get_mute_until(user_id)
+    if mute_until:
+        remaining = mute_until - int(time.time())
+        await message.answer(f"⏳ Вы замучены. Осталось: {human_time(remaining)}")
+        return
+
+    # --- ОБЫЧНЫЙ ЮЗЕР ---
+    await message.answer("Привет! пиши что тебе нужно, скоро тебя ответят...")
+
+
+# ============================================================
+#  ВХОДЯЩИЕ СООБЩЕНИЯ ОТ ЮЗЕРОВ
+# ============================================================
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def silent_handler(message: Message):
-    if db.is_blocked(message.from_user.id):
+    user_id = message.from_user.id
+
+    # Сообщения самих админов не пересылаем
+    if user_id in ADMINS:
         return
 
-    # Не пересылаем сообщения самих админов
-    if message.from_user.id in ADMINS:
+    # Заблокирован — молчим
+    if db.is_blocked(user_id):
+        return
+
+    # Замучен — отвечаем и молчим
+    mute_until = db.get_mute_until(user_id)
+    if mute_until:
+        remaining = mute_until - int(time.time())
+        await message.answer(f"⏳ Вы замучены. Осталось: {human_time(remaining)}")
         return
 
     user = message.from_user
@@ -84,13 +262,16 @@ async def silent_handler(message: Message):
                 admin_id,
                 text,
                 parse_mode="Markdown",
-                reply_markup=block_button(user.id),
+                reply_markup=user_message_kb(user.id),
             )
         except Exception as e:
             logging.warning(f"Не смог переслать админу {admin_id}: {e}")
 
 
-# ---------- ОБРАБОТКА КНОПКИ "ЗАБЛОКИРОВАТЬ" ----------
+# ============================================================
+#  ИНЛАЙН-КНОПКИ
+# ============================================================
+
 @router.callback_query(F.data.startswith("block:"))
 async def cb_block(call: CallbackQuery):
     if call.from_user.id not in ADMINS:
@@ -105,21 +286,54 @@ async def cb_block(call: CallbackQuery):
 
     db.block_user(user_id)
 
-    # Убираем кнопку и добавляем пометку в исходное сообщение
+    try:
+        await bot.send_message(user_id, "Вы были заблокированы⛔")
+    except Exception as e:
+        logging.warning(f"Не смог уведомить юзера {user_id}: {e}")
+
     try:
         new_text = (call.message.text or "") + "\n\n🚫 Заблокирован"
-        await call.message.edit_text(
-            new_text,
-            parse_mode="Markdown",
-            reply_markup=None,
-        )
+        await call.message.edit_text(new_text, reply_markup=None)
     except Exception as e:
-        logging.warning(f"Не смог отредактировать сообщение: {e}")
+        logging.warning(f"edit_text failed: {e}")
 
     await call.answer(f"Пользователь {user_id} заблокирован")
 
 
-# ---------- АДМИН-ПАНЕЛЬ ----------
+@router.callback_query(F.data.startswith("mute:"))
+async def cb_mute(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMINS:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(call.data.split(":")[1])
+    await state.update_data(target_user_id=user_id)
+    await state.set_state(MuteState.waiting_for_hours)
+    await call.message.answer(
+        f"На сколько часов замутить `{user_id}`?\n"
+        f"Отправь число, например: `24`",
+        parse_mode="Markdown",
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("reply:"))
+async def cb_reply(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMINS:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+
+    user_id = int(call.data.split(":")[1])
+    await state.update_data(target_user_id=user_id)
+    await state.set_state(ReplyState.waiting_for_message)
+    await call.message.answer("Напишите сообщение!")
+    await call.answer()
+
+
+# ============================================================
+#  АДМИН-ПАНЕЛЬ
+# ============================================================
+
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id not in ADMINS:
@@ -127,55 +341,57 @@ async def cmd_admin(message: Message):
     await message.answer("🛠 Админ-панель", reply_markup=admin_menu())
 
 
-@router.callback_query(F.data == "admin:list")
-async def admin_list(call: CallbackQuery):
+@router.callback_query(F.data == "admin:blocked_list")
+async def admin_blocked_list(call: CallbackQuery):
     if call.from_user.id not in ADMINS:
         await call.answer("Нет доступа", show_alert=True)
         return
 
     blocked = db.get_all_blocked()
     if not blocked:
-        await call.message.answer("Список заблокированных пуст.")
+        await call.message.answer("Список пуст.")
     else:
         text = "🚫 Заблокированные ID:\n" + "\n".join(f"• `{uid}`" for uid in blocked)
         await call.message.answer(text, parse_mode="Markdown")
     await call.answer()
 
 
-@router.callback_query(F.data == "admin:unblock")
-async def admin_unblock_start(call: CallbackQuery):
+@router.callback_query(F.data == "admin:muted_list")
+async def admin_muted_list(call: CallbackQuery):
     if call.from_user.id not in ADMINS:
         await call.answer("Нет доступа", show_alert=True)
         return
 
-    await call.message.answer(
-        "Отправь ID пользователя для разблокировки.\n"
-        "Пример: `123456789`",
-        parse_mode="Markdown",
-    )
+    muted = db.get_all_muted()
+    if not muted:
+        await call.message.answer("Список пуст.")
+    else:
+        now = int(time.time())
+        lines = []
+        for uid, until in muted:
+            lines.append(f"• `{uid}` — осталось {human_time(until - now)}")
+        await call.message.answer("🔇 Замученные:\n" + "\n".join(lines), parse_mode="Markdown")
     await call.answer()
 
 
-# ---------- РАЗБЛОКИРОВКА ПО ID (ввод вручную) ----------
-@router.message(F.text.regexp(r"^\d+$"))
-async def admin_id_input(message: Message):
-    if message.from_user.id not in ADMINS:
+@router.callback_query(F.data == "admin:unblock")
+async def admin_unblock_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMINS:
+        await call.answer("Нет доступа", show_alert=True)
         return
+    await state.set_state(UnblockState.waiting_for_user_id)
+    await call.message.answer("Отправь ID для разблокировки.")
+    await call.answer()
 
-    user_id = int(message.text)
 
-    if not db.is_blocked(user_id):
-        await message.answer(
-            f"Пользователь `{user_id}` не в блоке.",
-            parse_mode="Markdown",
-        )
+@router.callback_query(F.data == "admin:unmute")
+async def admin_unmute_start(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMINS:
+        await call.answer("Нет доступа", show_alert=True)
         return
-
-    db.unblock_user(user_id)
-    await message.answer(
-        f"✅ Пользователь `{user_id}` разблокирован.",
-        parse_mode="Markdown",
-    )
+    await state.set_state(UnmuteState.waiting_for_user_id)
+    await call.message.answer("Отправь ID для снятия мута.")
+    await call.answer()
 
 
 # ---------- ЗАПУСК ----------

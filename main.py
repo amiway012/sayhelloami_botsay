@@ -52,7 +52,8 @@ dp.startup.register(on_startup)
 async def cmd_start(message: Message):
     if db.is_blocked(message.from_user.id):
         return
-    await message.answer("Привет, сообщение получено, ожидай ответа")
+    await message.answer("Привет! Напиши что тебе нужно, и жди ответа.
+say hello?")
 
 
 @router.message(F.text & ~F.text.startswith("/"))

@@ -291,7 +291,7 @@ async def cb_block(call: CallbackQuery):
     await db.block_user(user_id)
 
     try:
-        await bot.send_message(user_id, "Вы были заблокированы⛔")
+        await bot.send_message(user_id, "⛔ Вы были заблокированы")
     except Exception as e:
         logging.warning(f"Не смог уведомить юзера {user_id}: {e}")
 

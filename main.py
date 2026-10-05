@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from collections import defaultdict, deque
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
@@ -27,7 +28,39 @@ router = Router()
 dp.include_router(router)
 
 
-# ---------- СОСТОЯНИЯ ----------
+# ---------- АНТИФЛУД ----------
+FLOOD_LIMIT = 5          # сколько сообщений
+FLOOD_WINDOW = 10        # за сколько секунд
+FLOOD_COOLDOWN = 30      # на сколько секунд затыкаем
+
+_user_messages = defaultdict(deque)
+_user_muted_until = {}
+
+
+def check_flood(user_id: int) -> bool:
+    """True, если юзер флудит."""
+    now = time.time()
+
+    if user_id in _user_muted_until:
+        if now < _user_muted_until[user_id]:
+            return True
+        else:
+            del _user_muted_until[user_id]
+
+    q = _user_messages[user_id]
+    while q and now - q[0] > FLOOD_WINDOW:
+        q.popleft()
+    q.append(now)
+
+    if len(q) >= FLOOD_LIMIT:
+        _user_muted_until[user_id] = now + FLOOD_COOLDOWN
+        q.clear()
+        return True
+
+    return False
+
+
+# ---------- СОСТОЯНИЯ (FSM) ----------
 class ReplyState(StatesGroup):
     waiting_for_message = State()
 
@@ -91,7 +124,7 @@ dp.shutdown.register(on_shutdown)
 
 
 # ============================================================
-#  FSM-ОБРАБОТЧИКИ
+#  FSM-ОБРАБОТЧИКИ (регистрируем ПЕРВЫМИ)
 # ============================================================
 
 @router.message(ReplyState.waiting_for_message)
@@ -232,7 +265,7 @@ async def cmd_start(message: Message):
 
 
 # ============================================================
-#  СООБЩЕНИЯ ОТ ЮЗЕРОВ
+#  ВХОДЯЩИЕ СООБЩЕНИЯ
 # ============================================================
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -250,6 +283,30 @@ async def silent_handler(message: Message):
         remaining = mute_until - int(time.time())
         await message.answer(f"⏳ Вы замучены. Осталось: {human_time(remaining)}")
         return
+
+    # ---------- АНТИФЛУД ----------
+    if check_flood(user_id):
+        user = message.from_user
+        username = f"@{user.username}" if user.username else "без юзернейма"
+        warning = (
+            f"⚠️ Антифлуд сработал\n"
+            f"От: {user.full_name} ({username})\n"
+            f"ID: `{user.id}`\n"
+            f"Больше {FLOOD_LIMIT} сообщений за {FLOOD_WINDOW} сек.\n"
+            f"Игнорируем на {FLOOD_COOLDOWN} сек."
+        )
+        for admin_id in ADMINS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    warning,
+                    parse_mode="Markdown",
+                    reply_markup=user_message_kb(user.id),
+                )
+            except Exception as e:
+                logging.warning(f"Антифлуд: не смог уведомить {admin_id}: {e}")
+        return
+    # ---------- /АНТИФЛУД ----------
 
     user = message.from_user
     username = f"@{user.username}" if user.username else "без юзернейма"
@@ -291,7 +348,7 @@ async def cb_block(call: CallbackQuery):
     await db.block_user(user_id)
 
     try:
-        await bot.send_message(user_id, "⛔ Вы были заблокированы")
+        await bot.send_message(user_id, "Вы были заблокированы⛔")
     except Exception as e:
         logging.warning(f"Не смог уведомить юзера {user_id}: {e}")
 

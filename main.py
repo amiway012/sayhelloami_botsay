@@ -153,6 +153,7 @@ async def on_startup(bot: Bot):
     global _cleanup_task
     await db.init_db()
     _cleanup_task = asyncio.create_task(cleanup_task())
+    print(f"🚀 VERSION 3.0 HISTORY+MEDIA")
     print(f"Бот запущен... ADMINS = {ADMINS}")
 
 
@@ -189,14 +190,68 @@ async def handle_admin_reply(message: Message, state: FSMContext):
         await message.answer("⚠️ Не найден получатель. Попробуй снова.")
         return
 
-    if not message.text:
-        await message.answer("⚠️ Отправь текстовое сообщение.")
-        return
-
     try:
-        await bot.send_message(target, f"📨 Ответ:\n\n{message.text}")
-        await db.save_message(target, True, message.text, None, None, None)
+        # --- ТЕКСТ ---
+        if message.text:
+            await bot.send_message(target, f"📨 Ответ:\n\n{message.text}")
+            await db.save_message(target, True, message.text, None, None, None)
+
+        # --- ФОТО ---
+        elif message.photo:
+            await bot.send_photo(
+                target, message.photo[-1].file_id,
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+            )
+            await db.save_message(target, True, None, "photo", message.photo[-1].file_id, message.caption)
+
+        # --- ГОЛОСОВОЕ ---
+        elif message.voice:
+            await bot.send_voice(
+                target, message.voice.file_id,
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+            )
+            await db.save_message(target, True, None, "voice", message.voice.file_id, message.caption)
+
+        # --- ВИДЕО ---
+        elif message.video:
+            await bot.send_video(
+                target, message.video.file_id,
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+            )
+            await db.save_message(target, True, None, "video", message.video.file_id, message.caption)
+
+        # --- ДОКУМЕНТ ---
+        elif message.document:
+            await bot.send_document(
+                target, message.document.file_id,
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+            )
+            await db.save_message(target, True, None, "document", message.document.file_id, message.caption)
+
+        # --- АУДИО ---
+        elif message.audio:
+            await bot.send_audio(
+                target, message.audio.file_id,
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
+            )
+            await db.save_message(target, True, None, "audio", message.audio.file_id, message.caption)
+
+        # --- КРУЖОК ---
+        elif message.video_note:
+            await bot.send_video_note(target, message.video_note.file_id)
+            await db.save_message(target, True, None, "video_note", message.video_note.file_id, None)
+
+        # --- СТИКЕР ---
+        elif message.sticker:
+            await bot.send_sticker(target, message.sticker.file_id)
+            await db.save_message(target, True, None, "sticker", message.sticker.file_id, None)
+
+        else:
+            await message.answer("⚠️ Такой тип сообщения не поддерживается.")
+            return
+
         await message.answer("✅ Сообщение отправлено.")
+
     except Exception as e:
         await message.answer(f"❌ Не удалось отправить: {e}")
 
@@ -285,7 +340,7 @@ async def handle_unmute(message: Message, state: FSMContext):
 
 
 # ============================================================
-#  КОМАНДЫ — СНАЧАЛА /start И /admin, ПОТОМ ЛОВУШКА
+#  КОМАНДЫ — /start И /admin ДО ЛОВУШКИ
 # ============================================================
 
 @router.message(CommandStart())
@@ -314,7 +369,6 @@ async def cmd_start(message: Message):
     await message.answer("Привет! пиши что тебе нужно, скоро тебя ответят...")
 
 
-# ← /admin ДОЛЖЕН БЫТЬ ЗДЕСЬ, ДО ЛОВУШКИ
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id not in ADMINS:
@@ -564,34 +618,4 @@ async def admin_muted_list(call: CallbackQuery):
     else:
         now = int(time.time())
         lines = [f"• `{uid}` — осталось {human_time(until - now)}" for uid, until in muted]
-        await call.message.answer("🔇 Замученные:\n" + "\n".join(lines), parse_mode="Markdown")
-    await call.answer()
-
-
-@router.callback_query(F.data == "admin:unblock")
-async def admin_unblock_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id not in ADMINS:
-        await call.answer("Нет доступа", show_alert=True)
-        return
-    await state.set_state(UnblockState.waiting_for_user_id)
-    await call.message.answer("Отправь ID для разблокировки.")
-    await call.answer()
-
-
-@router.callback_query(F.data == "admin:unmute")
-async def admin_unmute_start(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id not in ADMINS:
-        await call.answer("Нет доступа", show_alert=True)
-        return
-    await state.set_state(UnmuteState.waiting_for_user_id)
-    await call.message.answer("Отправь ID для снятия мута.")
-    await call.answer()
-
-
-# ---------- ЗАПУСК ----------
-async def main():
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        await call.message.an

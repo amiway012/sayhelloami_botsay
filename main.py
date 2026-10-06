@@ -31,18 +31,18 @@ dp.include_router(router)
 # ---------- АНТИФЛУД ----------
 FLOOD_LIMIT = 5
 FLOOD_WINDOW = 10
-FLOOD_COOLDOWN = 10 * 60
+FLOOD_COOLDOWN = 30
 
 _user_messages = defaultdict(deque)
 _user_muted_until = {}
 
 
-def check_flood(user_id: int) -> str:
+def check_flood(user_id: int) -> bool:
     now = time.time()
 
     if user_id in _user_muted_until:
         if now < _user_muted_until[user_id]:
-            return "ignoring"
+            return True
         else:
             del _user_muted_until[user_id]
 
@@ -54,9 +54,9 @@ def check_flood(user_id: int) -> str:
     if len(q) >= FLOOD_LIMIT:
         _user_muted_until[user_id] = now + FLOOD_COOLDOWN
         q.clear()
-        return "trigger"
+        return True
 
-    return "ok"
+    return False
 
 
 # ---------- СОСТОЯНИЯ ----------
@@ -153,7 +153,7 @@ async def on_startup(bot: Bot):
     global _cleanup_task
     await db.init_db()
     _cleanup_task = asyncio.create_task(cleanup_task())
-    print("🚀 VERSION 4.0 FLOOD-FIX")
+    print(f"🚀 VERSION 3.0 HISTORY+MEDIA")
     print(f"Бот запущен... ADMINS = {ADMINS}")
 
 
@@ -191,49 +191,57 @@ async def handle_admin_reply(message: Message, state: FSMContext):
         return
 
     try:
+        # --- ТЕКСТ ---
         if message.text:
             await bot.send_message(target, f"📨 Ответ:\n\n{message.text}")
             await db.save_message(target, True, message.text, None, None, None)
 
+        # --- ФОТО ---
         elif message.photo:
             await bot.send_photo(
                 target, message.photo[-1].file_id,
-                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
             )
             await db.save_message(target, True, None, "photo", message.photo[-1].file_id, message.caption)
 
+        # --- ГОЛОСОВОЕ ---
         elif message.voice:
             await bot.send_voice(
                 target, message.voice.file_id,
-                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
             )
             await db.save_message(target, True, None, "voice", message.voice.file_id, message.caption)
 
+        # --- ВИДЕО ---
         elif message.video:
             await bot.send_video(
                 target, message.video.file_id,
-                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
             )
             await db.save_message(target, True, None, "video", message.video.file_id, message.caption)
 
+        # --- ДОКУМЕНТ ---
         elif message.document:
             await bot.send_document(
                 target, message.document.file_id,
-                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
             )
             await db.save_message(target, True, None, "document", message.document.file_id, message.caption)
 
+        # --- АУДИО ---
         elif message.audio:
             await bot.send_audio(
                 target, message.audio.file_id,
-                caption="📨 Ответ:" + ("\n\n" + message.caption if message.caption else ""),
+                caption=f"📨 Ответ:{('\n\n' + message.caption) if message.caption else ''}",
             )
             await db.save_message(target, True, None, "audio", message.audio.file_id, message.caption)
 
+        # --- КРУЖОК ---
         elif message.video_note:
             await bot.send_video_note(target, message.video_note.file_id)
             await db.save_message(target, True, None, "video_note", message.video_note.file_id, None)
 
+        # --- СТИКЕР ---
         elif message.sticker:
             await bot.send_sticker(target, message.sticker.file_id)
             await db.save_message(target, True, None, "sticker", message.sticker.file_id, None)
@@ -332,7 +340,7 @@ async def handle_unmute(message: Message, state: FSMContext):
 
 
 # ============================================================
-#  КОМАНДЫ
+#  КОМАНДЫ — /start И /admin ДО ЛОВУШКИ
 # ============================================================
 
 @router.message(CommandStart())
@@ -428,7 +436,7 @@ async def notify_admins(message: Message):
 
 
 # ============================================================
-#  ЛОВУШКА
+#  ЛОВУШКА — САМАЯ ПОСЛЕДНЯЯ ИЗ MESSAGE-ХЕНДЛЕРОВ
 # ============================================================
 
 @router.message()
@@ -453,26 +461,15 @@ async def silent_handler(message: Message):
         await message.answer(f"⏳ Вы замучены. Осталось: {human_time(remaining)}")
         return
 
-    flood_status = check_flood(user_id)
-
-    if flood_status == "ignoring":
-        return
-
-    if flood_status == "trigger":
+    if check_flood(user_id):
         user = message.from_user
         username = f"@{user.username}" if user.username else "без юзернейма"
-
-        try:
-            await message.answer("⚠️ Слишком много сообщений. Подождите 10 минут.")
-        except Exception:
-            pass
-
         warning = (
             f"⚠️ Антифлуд сработал\n"
             f"От: {user.full_name} ({username})\n"
             f"ID: `{user.id}`\n"
-            f"Отправляет слишком много сообщений.\n"
-            f"Игнорируем на 10 минут."
+            f"Больше {FLOOD_LIMIT} сообщений за {FLOOD_WINDOW} сек.\n"
+            f"Игнорируем на {FLOOD_COOLDOWN} сек."
         )
         for admin_id in ADMINS:
             try:
@@ -604,8 +601,8 @@ async def admin_blocked_list(call: CallbackQuery):
     if not blocked:
         await call.message.answer("Список пуст.")
     else:
-        joined = "\n".join("• " + str(uid) for uid in blocked)
-        await call.message.answer("🚫 Заблокированные ID:\n" + joined)
+        text = "🚫 Заблокированные ID:\n" + "\n".join(f"• `{uid}`" for uid in blocked)
+        await call.message.answer(text, parse_mode="Markdown")
     await call.answer()
 
 
@@ -620,7 +617,5 @@ async def admin_muted_list(call: CallbackQuery):
         await call.message.answer("Список пуст.")
     else:
         now = int(time.time())
-        lines = []
-        for uid, until in muted:
-            lines.append("• " + str(uid) + " — осталось " + human_time(until - now))
-        await call.message.answer("🔇 Замученные:\n" + "\n".join(lines))
+        lines = [f"• `{uid}` — осталось {human_time(until - now)}" for uid, until in muted]
+        await call.message.an

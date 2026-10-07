@@ -149,6 +149,24 @@ async def on_startup(bot: Bot):
     print(f"🚀 VERSION 3.0 HISTORY+MEDIA")
     print(f"Бот запущен... ADMINS = {ADMINS}")
 
+    # ============================================
+    #  УВЕДОМЛЕНИЕ АДМИНОВ О ЗАПУСКЕ (НОВАЯ ФУНКЦИЯ)
+    # ============================================
+    startup_time = time.strftime("%d.%m.%Y %H:%M:%S")
+    startup_message = (
+        "🟢 <b>Бот успешно запущен!</b>\n\n"
+        f"🕐 Время запуска: <code>{startup_time}</code>\n"
+        f"📦 Версия: <b>3.0 HISTORY+MEDIA</b>\n"
+        f"👥 Количество админов: {len(ADMINS)}\n"
+        f"⚙️ Railway deploy завершён"
+    )
+
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(admin_id, startup_message, parse_mode="HTML")
+        except Exception as e:
+            logging.warning(f"Не смог уведомить админа {admin_id} о запуске: {e}")
+
 
 async def on_shutdown(bot: Bot):
     global _cleanup_task
@@ -164,8 +182,6 @@ async def on_shutdown(bot: Bot):
 
 dp.startup.register(on_startup)
 dp.shutdown.register(on_shutdown)
-
-
 # ============================================================
 #  FSM-ОБРАБОТЧИКИ
 # ============================================================

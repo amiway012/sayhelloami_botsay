@@ -176,7 +176,11 @@ async def cleanup_old_messages(days: int = 7) -> int:
     cutoff = int(time.time()) - days * 86400
     async with _pool.acquire() as conn:
         result = await conn.execute("DELETE FROM messages WHERE ts < $1", cutoff)
+        # asyncpg возвращает строку вида "DELETE 5"
         try:
-            return int(result.split()[-1])
-        except Exception:
+            parts = result.split()
+            if len(parts) >= 2:
+                return int(parts[-1])
+            return 0
+        except (ValueError, IndexError):
             return 0

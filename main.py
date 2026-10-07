@@ -2,7 +2,6 @@ import asyncio
 import logging
 import time
 from collections import defaultdict, deque
-
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -13,7 +12,6 @@ from aiogram.types import (
     InlineKeyboardMarkup,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-
 from config import BOT_TOKEN, ADMINS
 import database as db
 
@@ -27,7 +25,6 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-
 # ---------- АНТИФЛУД ----------
 FLOOD_LIMIT = 5
 FLOOD_WINDOW = 10
@@ -39,23 +36,19 @@ _user_muted_until = {}
 
 def check_flood(user_id: int) -> bool:
     now = time.time()
-
     if user_id in _user_muted_until:
         if now < _user_muted_until[user_id]:
             return True
         else:
             del _user_muted_until[user_id]
-
     q = _user_messages[user_id]
     while q and now - q[0] > FLOOD_WINDOW:
         q.popleft()
     q.append(now)
-
     if len(q) >= FLOOD_LIMIT:
         _user_muted_until[user_id] = now + FLOOD_COOLDOWN
         q.clear()
         return True
-
     return False
 
 
@@ -260,27 +253,21 @@ async def handle_admin_reply(message: Message, state: FSMContext):
 async def handle_mute_hours(message: Message, state: FSMContext):
     if message.from_user.id not in ADMINS:
         return
-
     if not message.text or not message.text.isdigit():
         await message.answer("Отправь число часов, например: 24")
         return
-
     hours = int(message.text)
     data = await state.get_data()
     target = data.get("target_user_id")
     await state.clear()
-
     if not target:
         await message.answer("⚠️ Не найден пользователь.")
         return
-
     await db.mute_user(target, hours)
-
     try:
         await bot.send_message(target, f"⏳ Вы замучены на {hours} ч.")
     except Exception:
         pass
-
     await message.answer(
         f"🔇 Пользователь `{target}` замучен на {hours} ч.",
         parse_mode="Markdown",
@@ -291,25 +278,19 @@ async def handle_mute_hours(message: Message, state: FSMContext):
 async def handle_unblock(message: Message, state: FSMContext):
     if message.from_user.id not in ADMINS:
         return
-
     if not message.text or not message.text.isdigit():
         await message.answer("Отправь числовой ID.")
         return
-
     user_id = int(message.text)
     await state.clear()
-
     if not await db.is_blocked(user_id):
         await message.answer(f"Пользователь `{user_id}` не в блоке.", parse_mode="Markdown")
         return
-
     await db.unblock_user(user_id)
-
     try:
         await bot.send_message(user_id, "✅ Вы были разблокированы.")
     except Exception:
         pass
-
     await message.answer(f"✅ `{user_id}` разблокирован.", parse_mode="Markdown")
 
 
@@ -317,25 +298,19 @@ async def handle_unblock(message: Message, state: FSMContext):
 async def handle_unmute(message: Message, state: FSMContext):
     if message.from_user.id not in ADMINS:
         return
-
     if not message.text or not message.text.isdigit():
         await message.answer("Отправь числовой ID.")
         return
-
     user_id = int(message.text)
     await state.clear()
-
     if not await db.get_mute_until(user_id):
         await message.answer(f"Пользователь `{user_id}` не в муте.", parse_mode="Markdown")
         return
-
     await db.unmute_user(user_id)
-
     try:
         await bot.send_message(user_id, "✅ Мут снят.")
     except Exception:
         pass
-
     await message.answer(f"🔊 `{user_id}` размучен.", parse_mode="Markdown")
 
 
@@ -346,14 +321,12 @@ async def handle_unmute(message: Message, state: FSMContext):
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     user_id = message.from_user.id
-
     if user_id in ADMINS:
         if await db.is_admin_seen(user_id):
             await message.answer("С возвращением, я вас ждал!")
         else:
             await message.answer("Привет, рады видеть вас!")
             await db.mark_admin_seen(user_id)
-
         await message.answer("🛠 Админ-панель", reply_markup=admin_menu())
         return
 
@@ -431,6 +404,7 @@ async def notify_admins(message: Message):
             elif message.sticker:
                 await bot.send_message(admin_id, f"📩 Стикер\n{header}", reply_markup=kb)
                 await bot.send_sticker(admin_id, message.sticker.file_id)
+
         except Exception as e:
             logging.warning(f"Не смог отправить админу {admin_id}: {e}")
 
@@ -443,7 +417,6 @@ async def notify_admins(message: Message):
 async def silent_handler(message: Message):
     if message.from_user is None:
         return
-
     if message.text and message.text.startswith("/"):
         return
 
@@ -508,7 +481,6 @@ async def cb_block(call: CallbackQuery):
         return
 
     await db.block_user(user_id)
-
     try:
         await bot.send_message(user_id, "Вы были заблокированы⛔")
     except Exception as e:
@@ -618,4 +590,5 @@ async def admin_muted_list(call: CallbackQuery):
     else:
         now = int(time.time())
         lines = [f"• `{uid}` — осталось {human_time(until - now)}" for uid, until in muted]
-        await call.message.an
+        await call.message.answer("\n".join(lines))
+    a
